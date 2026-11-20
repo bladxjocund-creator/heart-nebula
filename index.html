@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>掌中星河 · Heart Nebula</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#f7eaf9;background:#07050e}
+*{box-sizing:border-box}body{margin:0;overflow:hidden}button,input{font:inherit}
+#stage{position:fixed;inset:0;width:100%;height:100%;touch-action:none;background:radial-gradient(ellipse at 52% 49%,#251133 0%,#100b20 39%,#07050e 75%)}
+header{position:fixed;top:clamp(20px,5vw,55px);left:clamp(20px,5vw,74px);pointer-events:none}
+.eyebrow{color:#f0a7d1;font:12px ui-monospace,monospace;letter-spacing:.32em}
+h1{font-size:clamp(31px,5vw,66px);font-weight:580;letter-spacing:.09em;margin:5px 0 3px;text-shadow:0 0 38px #ff68c755}
+header p,footer p{color:#ccc0da;margin:0;font-size:14px}
+#readout{position:fixed;right:clamp(20px,5vw,74px);top:clamp(23px,5vw,58px);text-align:right}
+#readout strong{font:24px ui-monospace,monospace;color:#fff}
+#readout small{display:block;letter-spacing:.17em;font-size:12px;color:#dcb8dd;margin-top:4px}
+footer{position:fixed;bottom:max(20px,env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(720px,calc(100% - 28px));text-align:center}
+.bar{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;padding:9px;border:1px solid #e7b5ff36;border-radius:18px;background:#130c20e8;box-shadow:0 10px 50px #0008;backdrop-filter:blur(12px)}
+button{cursor:pointer;color:#f8eaff;background:#21172d;border:1px solid #e0b6ff2f;border-radius:10px;padding:8px 12px;font-size:14px;min-height:38px}
+button:hover,button[aria-pressed=true]{border-color:#f7a9e7;background:#512347}button:focus-visible,input:focus-visible{outline:2px solid #ffd1f8;outline-offset:3px}
+#camera{background:#f2a8dd;color:#230c27;font-weight:700}button:disabled{opacity:.65;cursor:wait}
+footer p{margin:9px 4px 0;line-height:1.55}
+label{display:flex;align-items:center;gap:6px;font-size:14px;color:#e6cce9}input{width:76px;accent-color:#ff9cde}
+video{position:fixed;right:20px;bottom:126px;width:144px;aspect-ratio:4/3;object-fit:contain;background:#080610;border-radius:12px;border:1px solid #f6b1e78a;transform:scaleX(-1);pointer-events:none}
+body.clean .hud{visibility:hidden}
+#restore{display:none;position:fixed;top:14px;right:14px;opacity:0}
+body.clean #restore{display:block}#restore:hover,#restore:focus-visible{opacity:1}
+@media(max-width:590px){header{top:17px}header p{font-size:12px}#readout{top:22px}#readout strong{font-size:17px}video{bottom:178px;width:92px;right:12px}.bar{gap:6px}button{padding:6px 9px}footer p{font-size:12px}}
+</style>
+</head>
+<body>
+<canvas id="stage" aria-label="互动爱心与星河粒子动画"></canvas>
+<header class="hud"><div class="eyebrow">HEART NEBULA</div><h1>掌中星河</h1><p>星河/爱心</p></header>
+<div id="readout" class="hud"><strong>42,000</strong><small id="meter">粒子 · 自动演示</small></div>
+<video id="preview" class="hud" autoplay muted playsinline hidden></video>
+<footer class="hud">
+<div class="bar">
+<button id="camera">开启手势</button>
+<button id="heart" aria-pressed="true">爱心</button>
+<button id="galaxy" aria-pressed="false">星河</button>
+<button id="demo" aria-pressed="true">自动演示</button>
+<label>聚散 <input id="spread" aria-label="粒子扩散程度" type="range" min="0" max="100" value="0"></label>
+<button id="clean">纯画面</button>
+</div>
+<p id="status" role="status">张掌散开 · 握拳聚合 · 拇指和食指捏一下切换形态</p>
+</footer>
+<button id="restore">恢复界面</button>
+<script>
+"use strict";
+const get = id => document.getElementById(id);
+let stage = get("stage");
+const video = get("preview"), status = get("status");
+const hint = "张掌散开 · 握拳聚合 · 拇指和食指捏一下切换形态";
+const clamp = n => Math.max(0, Math.min(1,n));
+const count = 42000, stars = 1500;
+const gl = stage.getContext("webgl", {alpha:true, antialias:false, depth:false});
+let shape = 0, morph = 0, diffusion = 0, manual = 0, burst = 0;
+let demo = true, demoStart = performance.now(), cameraStarting = false;
+let aimX = 0, aimY = 0, tiltX = 0, tiltY = 0;
+let tracker, stream, lastFrame = -1, lastCheck = 0, handSeen = 0;
+let handOpen = 0, pinchStart = 0, pinchArmed = false, releaseStart = 0;
+const handGrace = 380;
+let pixelRatio = 1;
+function selectShape(next) {
+  if (shape === next) return;
+  burst = 1;
+  shape = next;
+  get("heart").setAttribute("aria-pressed", String(!next));
+  get("galaxy").setAttribute("aria-pressed", String(!!next));
+}
+function setDemo(enabled) {
+  demo = enabled;
+  demoStart = performance.now();
+  get("demo").setAttribute("aria-pressed", String(enabled));
+}
+function toggleClean() {
+  document.body.classList.toggle("clean");
+}
+get("heart").onclick = () => {setDemo(false); selectShape(0);};
+get("galaxy").onclick = () => {setDemo(false); selectShape(1);};
+get("demo").onclick = () => setDemo(!demo);
+get("spread").oninput = event => {setDemo(false); manual = Number(event.target.value)/100;};
+get("clean").onclick = get("restore").onclick = toggleClean;
+document.addEventListener("keydown", event => {
+  if (event.repeat || /INPUT|BUTTON/.test(event.target.tagName) && event.code === "Space") return;
+  if (event.code === "Space") {event.preventDefault(); setDemo(false); selectShape(1-shape);}
+  if (event.code === "KeyH") toggleClean();
+  if (event.code === "Escape") document.body.classList.remove("clean");
+});
+function movePointer(event) {
+  if (performance.now()-handSeen < handGrace && stream) return;
+  aimX = event.clientX/innerWidth-.5;
+  aimY = event.clientY/innerHeight-.5;
+};
+function pressPointer(event) {
+  setDemo(false);
+  manual = 1;
+  burst = 1;
+  stage.setPointerCapture(event.pointerId);
+};
+function releasePointer(){manual=0;}
+stage.onpointermove=movePointer;
+stage.onpointerdown=pressPointer;
+stage.onpointerup=stage.onpointercancel=releasePointer;
+
+const vertex = `
+attribute vec3 heart, galaxy, cloud;
+attribute vec4 seed;
+uniform vec2 view, tilt;
+uniform float time, morph, spread, burst, dpr;
+varying mediump vec3 color;
+varying mediump float power, flare;
+vec2 rot(vec2 p,float a){float c=cos(a),s=sin(a);return vec2(c*p.x-s*p.y,s*p.x+c*p.y);}
+void main(){
+  float twinkle = .67+.33*sin(time*(1.1+seed.x*3.)+seed.y*55.);
+  if(seed.w>1.5){
+    vec2 sky=heart.xy+tilt*.048*(.3+seed.y);
+    gl_Position=vec4(sky,0.,1.);
+    gl_PointSize=(.75+2.8*pow(seed.x,7.))*dpr;
+    color=mix(vec3(.46,.40,1.),vec3(1.,.58,.83),seed.y);
+    power=(.19+seed.x*.38)*twinkle;
+    flare=0.;
+    return;
+  }
+  vec3 h=heart*(1.+.024*sin(time*2.7));
+  h.xz=rot(h.xz,sin(time*.65)*.20+tilt.x*.55);
+  h.yz=rot(h.yz,tilt.y*.32);
+  vec3 g=galaxy;
+  float radius=length(g.xz);
+  g.xz=rot(g.xz,time*(.12+.20/(.35+radius)));
+  g.yz=rot(g.yz,.60+tilt.y*.50+sin(time*.44)*.11);
+  g.xy=rot(g.xy,.24+tilt.x*.26);
+  vec3 p=mix(h,g,morph);
+  vec3 dust=cloud;
+  dust.xz=rot(dust.xz,time*.22+seed.x*.7);
+  dust.xy=rot(dust.xy,time*.11+spread*.7);
+  float scatter=spread*(.50+seed.x*.50);
+  p=mix(p,dust,scatter);
+  p+=normalize(dust+vec3(.0001))*burst*(.10+.45*seed.y);
+  float perspective=3.6/(3.6-p.z);
+  vec2 aspect=min(view.x,view.y)/view;
+  gl_Position=vec4(p.xy*perspective*aspect*.69+vec2(0.,.025),0.,1.);
+  vec3 magenta=mix(vec3(.86,.035,.22),vec3(1.,.37,.67),seed.y);
+  vec3 blue=mix(vec3(.24,.10,1.),vec3(.30,.82,1.),seed.y);
+  blue=mix(blue,vec3(1.,.64,.82),.79*exp(-radius*radius*4.4));
+  color=mix(magenta,blue,morph);
+  color=mix(color,vec3(1.,.92,.96),pow(seed.z,10.)*.9);
+  gl_PointSize=(1.05+1.7*pow(seed.z,3.)+9.*pow(seed.z,28.))*dpr*perspective;
+  power=(.24+.27*seed.y)*twinkle*(1.+.35*burst)*(1.+.52*spread);
+  flare=step(.969,seed.z);
+}`;
+const fragment = `
+precision mediump float;
+varying mediump vec3 color;
+varying mediump float power, flare;
+void main(){
+  vec2 p=abs(gl_PointCoord-.5)*2.;
+  float r=length(p);
+  float core=exp(-r*r*9.);
+  float halo=exp(-r*r*3.6)*.24;
+  float crossGlow=(exp(-p.x*34.)*exp(-p.y*3.5)+exp(-p.y*34.)*exp(-p.x*3.5))*.67*flare;
+  float a=(core+halo+crossGlow)*(1.-smoothstep(.68,1.,r))*power;
+  gl_FragColor=vec4(color*a,a);
+}`;
+
+function buildParticles(){
+  const data = new Float32Array((count+stars)*13);
+  const random = Math.random, tau = Math.PI*2;
+  const noise = () => (random()+random()+random()+random()-2);
+  for(let i=0;i<count;i++){
+    const t=random()*tau, edge=random()<.29, fill=edge ? .96+random()*.047 : Math.sqrt(random())*.96;
+    const x=Math.sin(t)**3;
+    const y=(13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t)+2.5)/16;
+    const depth=noise()*(.095+.52*Math.sqrt(Math.max(0,1-fill*fill)));
+    const core=random()<.22, r=core ? Math.pow(random(),1.8)*.48 : .12+Math.sqrt(random())*1.46;
+    const arm=Math.floor(random()*4)*tau/4;
+    const a=core || random()<.12 ? random()*tau : arm+r*3.75+noise()*(.16+.47/(1+r));
+    const z=random()*2-1, theta=random()*tau, cr=.55+Math.pow(random(),.58)*2.19;
+    const ring=Math.sqrt(1-z*z);
+    data.set([
+      x*fill+noise()*.012,y*fill+noise()*.013,depth,
+      r*Math.cos(a),noise()*(core ? .26 : .11),r*Math.sin(a),
+      Math.cos(theta)*ring*cr, Math.sin(theta)*ring*cr, z*cr*.72,
+      random(),random(),random(),0
+    ],i*13);
+  }
+  for(let i=count;i<count+stars;i++){
+    data[i*13]=random()*2-1;
+    data[i*13+1]=random()*2-1;
+    data.set([random(),random(),random(),2],i*13+9);
+  }
+  return data;
+}
+
+function createRenderer() {
+  if (!gl) throw new Error("WebGL unavailable");
+  const program = gl.createProgram();
+  for (const [type, source] of [[gl.VERTEX_SHADER,vertex],[gl.FRAGMENT_SHADER,fragment]]) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader,source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    gl.attachShader(program,shader);
+  }
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  gl.useProgram(program);
+
+  const data = buildParticles();
+  const buffer=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,buffer);
+  gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);
+  for(const [name,size,offset] of [["heart",3,0],["galaxy",3,3],["cloud",3,6],["seed",4,9]]){
+    const location=gl.getAttribLocation(program,name);
+    gl.enableVertexAttribArray(location);
+    gl.vertexAttribPointer(location,size,gl.FLOAT,false,52,offset*4);
+  }
+  const u=Object.fromEntries(["view","tilt","time","morph","spread","burst","dpr"].map(name=>[name,gl.getUniformLocation(program,name)]));
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE,gl.ONE);
+  gl.clearColor(0,0,0,0);
+  function resize(){
+    pixelRatio=Math.min(devicePixelRatio || 1,1.75);
+    stage.width=Math.round(stage.clientWidth*pixelRatio);
+    stage.height=Math.round(stage.clientHeight*pixelRatio);
+    gl.viewport(0,0,stage.width,stage.height);
+    gl.uniform2f(u.view,stage.width,stage.height);
+    gl.uniform1f(u.dpr,pixelRatio);
+  }
+  window.addEventListener("resize",resize);
+  resize();
+  return time => {
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.uniform2f(u.tilt,tiltX,tiltY);
+    gl.uniform1f(u.time,time);
+    gl.uniform1f(u.morph,morph);
+    gl.uniform1f(u.spread,diffusion);
+    gl.uniform1f(u.burst,burst);
+    gl.drawArrays(gl.POINTS,0,count+stars);
+  };
+}
+
+function createCanvasRenderer(){
+  const canvas=stage.cloneNode();
+  stage.replaceWith(canvas);
+  stage=canvas;
+  canvas.onpointermove=movePointer;
+  canvas.onpointerdown=pressPointer;
+  canvas.onpointerup=canvas.onpointercancel=releasePointer;
+
+  const ctx=canvas.getContext("2d", {alpha:true});
+  if(!ctx) throw new Error("Canvas unavailable");
+  const data=buildParticles(), step=6;
+  get("readout").firstElementChild.textContent=(count*3/step).toLocaleString();
+  function resize(){
+    canvas.width=canvas.clientWidth;
+    canvas.height=canvas.clientHeight;
+  }
+  window.addEventListener("resize",resize);
+  resize();
+  return time=>{
+    const w=canvas.width,h=canvas.height,scale=Math.min(w,h)*.345;
+    ctx.clearRect(0,0,w,h);
+    ctx.fillStyle="#aa94eb60";
+    for(let i=count*13;i<data.length;i+=26){
+      const size=.65+data[i+9]**5*1.6;
+      ctx.fillRect((data[i]*.5+.5)*w,(data[i+1]*.5+.5)*h,size,size);
+    }
+    const rotation=time*.26, cg=Math.cos(rotation),sg=Math.sin(rotation);
+    const spin=time*.21+diffusion*.9,cs=Math.cos(spin),ss=Math.sin(spin);
+    const pulse=1+.025*Math.sin(time*2.7);
+    const centerX=w*.5, centerY=h*.487;
+    ctx.globalCompositeOperation="lighter";
+    const red=Math.round(255-131*morph),green=Math.round(84+92*morph),blue=Math.round(148+107*morph);
+    for(let layer=0;layer<3;layer++){
+      ctx.fillStyle=layer===2?"#fff0fdcc":"rgba("+red+","+green+","+blue+","+(layer===0?.38:.63)+")";
+      ctx.beginPath();
+      for(let i=layer*13;i<count*13;i+=step*13){
+        const seed=data[i+9],gx=data[i+3]*cg-data[i+5]*sg;
+        const gz=data[i+3]*sg+data[i+5]*cg;
+        const gy=data[i+4]+gz*(.47+tiltY*.25);
+        const hx=(data[i]+data[i+2]*tiltX*.4)*pulse,hy=data[i+1]*pulse;
+        const dx=data[i+6]*cs-data[i+7]*ss,dy=data[i+6]*ss+data[i+7]*cs;
+        const scatter=diffusion*(.53+.47*seed);
+        const expand=1+burst*(.07+.25*seed);
+        const x=centerX+scale*((hx+(gx-hx)*morph)*(1-scatter)+dx*scatter)*expand;
+        const y=centerY-scale*((hy+(gy-hy)*morph)*(1-scatter)+dy*scatter)*expand;
+        const size=layer===2 ? .48+data[i+11]**15*2.4 : .56+layer*.35;
+        ctx.rect(x,y,size,size);
+      }
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation="source-over";
+  };
+}
+
+function stopCamera() {
+  if(stream) stream.getTracks().forEach(track=>track.stop());
+  stream=null;
+  video.srcObject=null;
+  video.hidden=true;
+  lastFrame=-1;
+  handSeen=handOpen=pinchStart=releaseStart=0;
+  pinchArmed=false;
+  get("camera").textContent="开启手势";
+}
+get("camera").onclick = async () => {
+  if(stream && !cameraStarting) {stopCamera(); status.textContent=hint; return;}
+  if(cameraStarting) return;
+  const button=get("camera");
+  cameraStarting=true;
+  button.disabled=true;
+  button.textContent="正在启动…";
+  status.textContent="请允许摄像头访问，随后加载手势模型。";
+  let phase="camera";
+  try {
+    if(!navigator.mediaDevices?.getUserMedia) throw new Error("Camera unavailable");
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{width:{ideal:640},height:{ideal:480},facingMode:"user"}});
+    video.srcObject=stream;
+    await video.play();
+    phase="model";
+    status.textContent="正在加载手势模型…";
+    if(!tracker){
+      const base="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21";
+      const {FilesetResolver,HandLandmarker}=await import(base+"/vision_bundle.mjs");
+      const wasm=await FilesetResolver.forVisionTasks(base+"/wasm");
+      tracker=await HandLandmarker.createFromOptions(wasm,{
+        baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"},
+        runningMode:"VIDEO",numHands:1
+      });
+    }
+    video.hidden=false;
+    setDemo(false);
+    button.textContent="关闭手势";
+    status.textContent=hint;
+  } catch(error) {
+    console.warn(error);
+    stopCamera();
+    status.textContent=phase==="model" ? "手势模型加载失败，请检查网络后重试。也可按住画面散开，空格切换形态。" :
+      "摄像头无法启动，请检查权限和设备。也可按住画面散开，空格切换形态。";
+  } finally {
+    cameraStarting=false;
+    button.disabled=false;
+  }
+};
+window.addEventListener("pagehide",stopCamera);
+
+function trackHand(now) {
+  if(!stream || cameraStarting || video.readyState<2 || now-lastCheck<36 || video.currentTime===lastFrame) return;
+  lastCheck=now;
+  lastFrame=video.currentTime;
+  let result;
+  try {result=tracker.detectForVideo(video,now);}
+  catch(error) {
+    console.warn(error);
+    stopCamera();
+    status.textContent="手势识别中断，可重新开启摄像头或使用鼠标。";
+    return;
+  }
+  const hand=result.landmarks[0];
+  if(!hand){
+    pinchStart=releaseStart=0;
+    return;
+  }
+  const gap=handSeen ? now-handSeen : Infinity;
+  if(gap>=handGrace){
+    pinchArmed=false;
+    pinchStart=releaseStart=0;
+  }
+  handSeen=now;
+  const world=result.worldLandmarks?.[0];
+  const points=world || hand;
+  const yScale=world ? 1 : video.videoHeight/video.videoWidth;
+  const distance=(a,b)=>Math.hypot(points[a].x-points[b].x,(points[a].y-points[b].y)*yScale,points[a].z-points[b].z);
+  const palm=(distance(0,9)+distance(5,17))*.5;
+  if(!Number.isFinite(palm) || palm<.001) return;
+
+  // Compare fingertip reach with finger length. Both measurements use the same coordinates.
+  const extension=[5,9,13,17].map(base=>{
+    const length=distance(base,base+1)+distance(base+1,base+2)+distance(base+2,base+3);
+    return clamp((distance(base,base+3)/Math.max(length,.001)-.52)/.37);
+  });
+  // The middle two scores keep a single noisy landmark from moving the entire effect.
+  const middle=extension.slice().sort((a,b)=>a-b);
+  const open=clamp(((middle[1]+middle[2])*.5-.12)/.76);
+  handOpen+= (open-handOpen)*(1-Math.exp(-gap/78));
+  aimX=.5-hand[9].x;
+  aimY=hand[9].y-.5;
+
+  const pinch=distance(4,8)/palm;
+  const twoFingersExtended=extension.slice(1).filter(value=>value>.66).length>=2;
+  if(pinch>.48 && twoFingersExtended){
+    releaseStart ||= now;
+    if(now-releaseStart>=65) pinchArmed=true;
+  } else {
+    releaseStart=0;
+  }
+
+  if(!pinchArmed || !twoFingersExtended || pinch>.38 || (!pinchStart && pinch>.29)){
+    pinchStart=0;
+    return;
+  }
+  pinchStart ||= now;
+  if(now-pinchStart>=105){
+    pinchArmed=false;
+    pinchStart=0;
+    setDemo(false);
+    selectShape(1-shape);
+  }
+}
+
+try {
+  let draw;
+  try {draw=createRenderer();}
+  catch(error) {console.warn(error);draw=createCanvasRenderer();}
+  let previous=performance.now();
+  let lastMeter="";
+  function frame(now){
+    const dt=Math.min(.05,(now-previous)/1000);
+    previous=now;
+    trackHand(now);
+    const live=!!stream && !cameraStarting && handSeen>0 && now-handSeen<handGrace;
+    const elapsed=(now-demoStart)/1000;
+    let target=live ? handOpen : manual;
+    if(demo && !live){
+      const cycle=elapsed%7.6;
+      selectShape(Math.floor(elapsed/7.6)%2);
+      target=.065+.79*Math.pow(Math.sin(Math.PI*clamp((cycle-2.7)/4.9)),5);
+    }
+    const label=live ? (handOpen>.68?"张掌散开":handOpen<.26?"握拳聚合":"手势跟踪") :
+      stream && !cameraStarting ? "等待手掌" : demo ? "自动演示" : "手动控制";
+    if(label!==lastMeter){get("meter").textContent="粒子 · "+label;lastMeter=label;}
+    morph+=(shape-morph)*(1-Math.exp(-dt*3.1));
+    diffusion+=(target-diffusion)*(1-Math.exp(-dt*(target>diffusion?8.5:5.2)));
+    tiltX+=(aimX-tiltX)*(1-Math.exp(-dt*4));
+    tiltY+=(aimY-tiltY)*(1-Math.exp(-dt*4));
+    burst*=Math.exp(-dt*2.9);
+    draw(now/1000);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+} catch(error) {
+  console.error(error);
+  get("camera").disabled=true;
+  status.textContent="浏览器无法启动 WebGL，请尝试用开启图形加速的 Chrome 或 Edge 打开。";
+}
+</script>
+</body>
+</html>
